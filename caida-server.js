@@ -19,21 +19,17 @@ const httpServer = http.createServer((req, res) => {
 
 // ─── DECK ─────────────────────────────────────────────────────────────────────
 const SUITS = ['oros', 'copas', 'espadas', 'bastos'];
-const VALUES = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12]; // baraja española 40 cartas
+const VALUES = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12];
 
 function makeCard(suit, val) {
   const display = val === 10 ? '10-Sota' : val === 11 ? '11-Caballo' : val === 12 ? '12-Rey' : String(val);
   return { suit, val, display };
 }
-
 function makeDeck() {
-  const deck = [];
-  for (const suit of SUITS)
-    for (const val of VALUES)
-      deck.push(makeCard(suit, val));
-  return deck;
+  const d = [];
+  for (const s of SUITS) for (const v of VALUES) d.push(makeCard(s, v));
+  return d;
 }
-
 function shuffle(arr) {
   for (let i = arr.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -43,11 +39,8 @@ function shuffle(arr) {
 }
 
 // ─── CARD HELPERS ─────────────────────────────────────────────────────────────
-
-// Is val a "figure" (Sota/Caballo/Rey)?
 function isFigure(val) { return val >= 10; }
 
-// Points for a caída (falling on card played by previous player)
 function caídaPoints(val) {
   if (val <= 7) return 1;
   if (val === 10) return 2;
@@ -56,57 +49,39 @@ function caídaPoints(val) {
   return 1;
 }
 
-// Check if array of vals are consecutive (escalera)
 function areConsecutive(vals) {
   if (vals.length < 2) return false;
-  const sorted = [...vals].sort((a, b) => a - b);
-  for (let i = 1; i < sorted.length; i++) {
-    if (sorted[i] !== sorted[i-1] + 1) return false;
-  }
+  const s = [...vals].sort((a, b) => a - b);
+  for (let i = 1; i < s.length; i++) if (s[i] !== s[i - 1] + 1) return false;
   return true;
 }
 
-// Analyze cantos for a hand of 3 cards
 function analyzeCantos(hand) {
   const vals = hand.map(c => c.val);
   const counts = {};
   vals.forEach(v => { counts[v] = (counts[v] || 0) + 1; });
-  const countVals = Object.values(counts).sort((a, b) => b - a);
+  const cv = Object.values(counts).sort((a, b) => b - a);
 
-  // Tibilín: 3 iguales — wins instantly
-  if (countVals[0] === 3) {
+  if (cv[0] === 3) {
     const v = parseInt(Object.keys(counts).find(k => counts[k] === 3));
     return { type: 'tibilin', rank: 100, pts: 0, val: v, desc: `Tibilín de ${v}` };
   }
-
-  // Vigía: 2 iguales + 1 consecutiva a ellas
-  if (countVals[0] === 2) {
-    const pairVal = parseInt(Object.keys(counts).find(k => counts[k] === 2));
-    const singleVal = parseInt(Object.keys(counts).find(k => counts[k] === 1));
-    if (Math.abs(pairVal - singleVal) === 1) {
-      const pts = 7;
-      return { type: 'vigia', rank: 3, pts, val: pairVal, desc: `Vigía de ${pairVal}` };
-    }
-    // Ronda: 2 iguales, no consecutiva
-    const pts = isFigure(pairVal) ? caídaPoints(pairVal) : 1;
-    return { type: 'ronda', rank: 2, pts, val: pairVal, desc: `Ronda de ${pairVal}` };
+  if (cv[0] === 2) {
+    const pv = parseInt(Object.keys(counts).find(k => counts[k] === 2));
+    const sv = parseInt(Object.keys(counts).find(k => counts[k] === 1));
+    if (Math.abs(pv - sv) === 1)
+      return { type: 'vigia', rank: 3, pts: 7, val: pv, desc: `Vigía de ${pv}` };
+    const pts = isFigure(pv) ? caídaPoints(pv) : 1;
+    return { type: 'ronda', rank: 2, pts, val: pv, desc: `Ronda de ${pv}` };
   }
-
-  // Patrulla: 3 consecutivas
-  if (areConsecutive(vals)) {
+  if (areConsecutive(vals))
     return { type: 'patrulla', rank: 4, pts: 6, val: Math.max(...vals), desc: `Patrulla ${Math.min(...vals)}-${Math.max(...vals)}` };
-  }
-
-  return null; // no canto
+  return null;
 }
 
-// Compare two cantos — returns >0 if a beats b
 function compareCantos(a, b) {
-  if (!a && !b) return 0;
-  if (!a) return -1;
-  if (!b) return 1;
+  if (!a && !b) return 0; if (!a) return -1; if (!b) return 1;
   if (a.rank !== b.rank) return a.rank - b.rank;
-  // Same type: compare val (higher is better for figures, same logic)
   return a.val - b.val;
 }
 
@@ -116,78 +91,75 @@ const rooms = {};
 function createRoom(code, maxPlayers) {
   maxPlayers = [2, 3, 4].includes(maxPlayers) ? maxPlayers : 4;
   return {
-    code,
-    maxPlayers,
-    players: [],       // { id, ws, name, team, hand, collected, cantos }
+    code, maxPlayers,
+    players: [],
     state: 'waiting',
     deck: [],
-    tableCards: [],    // 4 face-up cards on table
+    tableCards: [],
     round: 0,
     dealer: 0,
     currentTurn: 0,
-    lastPlayedCard: null,   // { card, playerIdx } — for caída detection
+    lastPlayedCard: null,
     lastPlayedBy: -1,
-    scores: [],        // per player (or per team in 2v2)
+    lastCollectorIdx: -1,
+    isLastTanda: false,
+    scores: [],
     teamMode: false,
-    cantosDone: false,  // whether cantos phase is resolved
-    cantoResults: [],   // resolved cantos for display
-    log: [],
-    puestoResult: null, // result of initial 4-card deal
-    gameOver: false,
-    roundsPlayed: 0,
+    puestoState: 'choosing',
+    puestoDirection: null,
+    puestoTargets: [],
+    puestoTargetIdx: 0,
+    puestoTarget: null,
+    puestoRevealed: [],
+    puestoResult: null,
+    cantosDone: false,
+    cantoResults: [],
+    roundLog: [],
+    readyForNext: [],
   };
 }
 
 function broadcast(room, msg) {
-  room.players.forEach(p => {
-    if (p.ws.readyState === 1) p.ws.send(JSON.stringify(msg));
-  });
+  room.players.forEach(p => { if (p.ws.readyState === 1) p.ws.send(JSON.stringify(msg)); });
 }
+function sendTo(p, msg) { if (p.ws.readyState === 1) p.ws.send(JSON.stringify(msg)); }
+function addLog(room, msg) { broadcast(room, { type: 'log', msg }); }
+function addRoundLog(room, entry) { room.roundLog.push(entry); }
 
-function sendTo(player, msg) {
-  if (player.ws.readyState === 1) player.ws.send(JSON.stringify(msg));
-}
-
-function addLog(room, msg) {
-  room.log.push(msg);
-  broadcast(room, { type: 'log', msg });
-}
-
-// ─── BUILD STATE ──────────────────────────────────────────────────────────────
+// ─── STATE ────────────────────────────────────────────────────────────────────
 function buildStateFor(room, player) {
   const myIdx = room.players.indexOf(player);
   return {
-    roomCode: room.code,
-    maxPlayers: room.maxPlayers,
-    gameState: room.state,
-    teamMode: room.teamMode,
+    roomCode: room.code, maxPlayers: room.maxPlayers,
+    gameState: room.state, teamMode: room.teamMode,
     players: room.players.map((p, i) => ({
-      id: p.id,
-      name: p.name,
-      team: p.team,
+      id: p.id, name: p.name, team: p.team,
       cardCount: p.hand ? p.hand.length : 0,
       collectedCount: p.collected ? p.collected.length : 0,
       isYou: p.id === player.id,
       hand: p.id === player.id ? p.hand : null,
       canto: p.canto || null,
-      cantoDeclared: p.cantoDeclared || false,
     })),
     tableCards: room.tableCards,
     scores: room.scores,
     currentTurn: room.currentTurn,
     dealer: room.dealer,
+    manoIdx: room.players.length > 0 ? (room.dealer + 1) % room.players.length : 0,
     lastPlayedCard: room.lastPlayedCard,
     lastPlayedBy: room.lastPlayedBy,
     myIdx,
     cantosDone: room.cantosDone,
     cantoResults: room.cantoResults || [],
+    puestoState: room.puestoState,
+    puestoDirection: room.puestoDirection,
+    puestoTarget: room.puestoTarget,
+    puestoRevealed: room.puestoRevealed || [],
     puestoResult: room.puestoResult,
     round: room.round,
     cardsInDeck: room.deck.length,
-    gameOver: room.gameOver,
+    isLastTanda: room.isLastTanda,
   };
 }
-
 function sendState(room) {
   room.players.forEach(p => sendTo(p, { type: 'state', state: buildStateFor(room, p) }));
 }
@@ -196,140 +168,159 @@ function sendState(room) {
 function startGame(room) {
   const n = room.players.length;
   room.teamMode = n === 4;
-  // Assign teams for 4p: seats 0,2 = team 0; seats 1,3 = team 1
-  room.players.forEach((p, i) => {
-    p.team = room.teamMode ? i % 2 : i; // in non-team modes each player is their own "team"
-    p.collected = [];
-    p.canto = null;
-    p.cantoDeclared = false;
-  });
+  room.players.forEach((p, i) => { p.team = room.teamMode ? i % 2 : i; p.collected = []; p.canto = null; });
   room.scores = room.players.map(() => 0);
-  room.round = 0;
-  room.dealer = 0;
+  room.round = 0; room.dealer = 0;
   addLog(room, `🎮 ¡Comienza la Caída! ${n} jugadores`);
   dealRound(room);
 }
 
 // ─── DEAL ROUND ───────────────────────────────────────────────────────────────
 function dealRound(room) {
-  const n = room.players.length;
   room.deck = shuffle(makeDeck());
   room.tableCards = [];
-  room.lastPlayedCard = null;
-  room.lastPlayedBy = -1;
-  room.cantosDone = false;
-  room.cantoResults = [];
-  room.puestoResult = null;
+  room.lastPlayedCard = null; room.lastPlayedBy = -1; room.lastCollectorIdx = -1;
+  room.isLastTanda = false;
+  room.cantosDone = false; room.cantoResults = [];
+  room.roundLog = []; room.readyForNext = [];
+  room.puestoState = 'choosing'; room.puestoDirection = null;
+  room.puestoTarget = null; room.puestoRevealed = []; room.puestoResult = null;
+  room.players.forEach(p => { p.hand = []; p.collected = []; p.canto = null; });
+
+  addLog(room, `🃏 Reparto ${room.round + 1} — Repartidor: ${room.players[room.dealer].name}`);
+  room.state = 'puesto_choosing';
+  sendState(room);
+  broadcast(room, { type: 'puesto_choose', dealerIdx: room.dealer, dealerName: room.players[room.dealer].name });
+}
+
+// ─── PUESTO ───────────────────────────────────────────────────────────────────
+function startPuesto(room, direction) {
+  room.puestoDirection = direction;
+  room.puestoRevealed = [];
+  room.puestoState = 'revealing';
+  room.puestoTargets = direction === 'asc' ? [1, 2, 3, 4] : [4, 3, 2, 1];
+  room.puestoTargetIdx = 0;
+  room.puestoTarget = room.puestoTargets[0];
+  addLog(room, `🎯 Puesto ${direction === 'asc' ? '1→4' : '4→1'}: buscando el ${room.puestoTarget}...`);
+  sendState(room);
+  setTimeout(() => revealNextPuestoCard(room), 800);
+}
+
+function revealNextPuestoCard(room) {
+  if (room.deck.length === 0) { finishPuesto(room, false); return; }
+  const card = room.deck.splice(0, 1)[0];
+  room.puestoRevealed.push(card);
+  const target = room.puestoTarget;
+
+  broadcast(room, { type: 'puesto_card_revealed', card, target, revealed: room.puestoRevealed });
+  sendState(room);
+
+  if (card.val === target) {
+    const pts = target;
+    room.scores[room.dealer] += pts;
+    addRoundLog(room, { event: 'Puesto', player: room.players[room.dealer].name, pts, detail: `${card.display} = ${target}` });
+    addLog(room, `✅ ¡PUESTO! ${card.display} coincide con ${target} — +${pts} pts para ${room.players[room.dealer].name}`);
+    room.tableCards = [...room.puestoRevealed];
+    setTimeout(() => finishPuesto(room, true), 800);
+  } else {
+    room.puestoTargetIdx++;
+    if (room.puestoTargetIdx >= room.puestoTargets.length) {
+      const manoIdx = (room.dealer + 1) % room.players.length;
+      room.scores[manoIdx] += 1;
+      addRoundLog(room, { event: 'Puesto fallido', player: room.players[manoIdx].name, pts: 1, detail: 'Repartidor no acertó' });
+      addLog(room, `❌ Puesto fallido — +1 para la mano (${room.players[manoIdx].name})`);
+      room.tableCards = [...room.puestoRevealed];
+      setTimeout(() => finishPuesto(room, false), 800);
+    } else {
+      room.puestoTarget = room.puestoTargets[room.puestoTargetIdx];
+      addLog(room, `  ↳ No es ${target}, buscando el ${room.puestoTarget}...`);
+      sendState(room);
+      setTimeout(() => revealNextPuestoCard(room), 1200);
+    }
+  }
+}
+
+function finishPuesto(room, hit) {
+  room.puestoState = 'done';
+  while (room.tableCards.length < 4 && room.deck.length > 0)
+    room.tableCards.push(room.deck.splice(0, 1)[0]);
+  room.puestoResult = { hit, direction: room.puestoDirection };
+  addLog(room, `🃏 Mesa inicial: ${room.tableCards.map(c => c.display).join(', ')}`);
+  sendState(room);
+  setTimeout(() => dealTanda(room), 1200);
+}
+
+// ─── TANDA ────────────────────────────────────────────────────────────────────
+function dealTanda(room) {
+  const n = room.players.length;
+  room.isLastTanda = room.deck.length < n * 3;
+
   room.players.forEach(p => {
-    p.hand = [];
-    p.collected = [];
     p.canto = null;
-    p.cantoDeclared = false;
+    p.hand = room.deck.splice(0, Math.min(3, room.deck.length));
   });
 
-  // Put 4 face-up cards on table
-  room.tableCards = room.deck.splice(0, 4);
-
-  // Check "puesto" — table cards sum to 10 or are all consecutive
-  const tableVals = room.tableCards.map(c => c.val);
-  const tableSum = tableVals.reduce((a, b) => a + b, 0);
-  const tableConsec = areConsecutive(tableVals);
-  if (tableSum === 10 || tableConsec) {
-    const reason = tableSum === 10 ? `suman 10 (${tableSum})` : `son consecutivas`;
-    room.puestoResult = { dealer: room.players[room.dealer].name, reason };
-    // Dealer scores 1 point for puesto
-    room.scores[room.dealer] += 1;
-    addLog(room, `🎯 ¡PUESTO! Las 4 cartas de la mesa ${reason} — +1 para ${room.players[room.dealer].name}`);
+  // 3p leftover
+  if (n === 3 && room.deck.length === 1) {
+    room.players[room.dealer].hand.push(room.deck.pop());
+    addLog(room, `🃏 Carta sobrante al repartidor`);
   }
 
-  // Deal 3 cards to each player
-  room.players.forEach(p => { p.hand = room.deck.splice(0, 3); });
-
-  // Analyze cantos
-  room.players.forEach(p => { p.canto = analyzeCantos(p.hand); });
-
+  room.players.forEach(p => { p.canto = p.hand.length >= 3 ? analyzeCantos(p.hand) : null; });
+  room.cantosDone = false; room.cantoResults = [];
   room.state = 'cantos';
   room.currentTurn = (room.dealer + 1) % n;
-  addLog(room, `🃏 Reparto ${room.round + 1}. Repartidor: ${room.players[room.dealer].name}`);
 
+  if (room.players.every(p => p.hand.length === 0)) { endRound(room); return; }
+
+  addLog(room, `🃏 Tanda${room.isLastTanda ? ' final' : ''} repartida`);
   sendState(room);
   resolveCantos(room);
 }
 
-// ─── CANTOS RESOLUTION ────────────────────────────────────────────────────────
+// ─── CANTOS ───────────────────────────────────────────────────────────────────
 function resolveCantos(room) {
-  const players = room.players;
-  const n = players.length;
+  const n = room.players.length;
   const manoIdx = (room.dealer + 1) % n;
-
-  const withCanto = players.map((p, i) => ({ p, i, canto: p.canto })).filter(x => x.canto);
+  const withCanto = room.players.map((p, i) => ({ p, i, canto: p.canto })).filter(x => x.canto);
 
   if (withCanto.length === 0) {
-    room.cantosDone = true;
-    room.cantoResults = [];
-    room.state = 'playing';
+    room.cantosDone = true; room.state = 'playing';
     addLog(room, '▶️ Sin cantos — ¡a jugar!');
-    sendState(room);
-    return;
+    sendState(room); return;
   }
 
-  // Check for tibilín
-  const tibilin = withCanto.find(x => x.canto.type === 'tibilin');
-  if (tibilin) {
-    // If multiple tibilines, mano wins
-    const tibilines = withCanto.filter(x => x.canto.type === 'tibilin');
-    let winner;
-    if (tibilines.length === 1) {
-      winner = tibilines[0];
-    } else {
-      // mano priority
-      winner = tibilines.reduce((best, cur) => {
-        const distBest = (best.i - manoIdx + n) % n;
-        const distCur  = (cur.i  - manoIdx + n) % n;
-        return distCur < distBest ? cur : best;
-      });
-    }
-    addLog(room, `🃏 ¡TIBILÍN! ${winner.p.name} tiene tres ${winner.canto.val} — ¡gana la ronda automáticamente!`);
-    room.scores[winner.i] += 10; // Tibilín wins the round
+  const tibilines = withCanto.filter(x => x.canto.type === 'tibilin');
+  if (tibilines.length > 0) {
+    const winner = tibilines.reduce((b, c) => ((c.i - manoIdx + n) % n) < ((b.i - manoIdx + n) % n) ? c : b);
+    room.scores[winner.i] += 10;
+    addRoundLog(room, { event: 'Tibilín', player: winner.p.name, pts: 10, detail: winner.canto.desc });
+    addLog(room, `🃏 ¡TIBILÍN! ${winner.p.name} — +10 pts. ¡Gana el reparto!`);
     room.cantoResults = [{ player: winner.p.name, canto: winner.canto.desc, pts: 10, won: true }];
     room.cantosDone = true;
-    endRound(room);
-    return;
+    endRound(room); return;
   }
 
-  // Find best canto among all players
-  let bestCanto = null;
-  withCanto.forEach(x => {
-    if (compareCantos(x.canto, bestCanto) > 0) bestCanto = x.canto;
-  });
+  let best = null;
+  withCanto.forEach(x => { if (compareCantos(x.canto, best) > 0) best = x.canto; });
+  const top = withCanto.filter(x => compareCantos(x.canto, best) === 0);
+  const winner = top.reduce((b, c) => ((c.i - manoIdx + n) % n) < ((b.i - manoIdx + n) % n) ? c : b);
 
-  // Among those with the best canto, mano wins ties
-  const topCantos = withCanto.filter(x => compareCantos(x.canto, bestCanto) === 0);
-  const winner = topCantos.reduce((best, cur) => {
-    const distBest = (best.i - manoIdx + n) % n;
-    const distCur  = (cur.i  - manoIdx + n) % n;
-    return distCur < distBest ? cur : best;
-  });
-
-  // Winner's canto kills lower cantos — winner scores all canto points including beaten ones
   let totalPts = winner.canto.pts;
   const results = [];
-
   withCanto.forEach(x => {
     if (x.i === winner.i) {
       results.push({ player: x.p.name, canto: x.canto.desc, pts: x.canto.pts, won: true });
     } else {
-      // Beaten canto: winner absorbs its points
       totalPts += x.canto.pts;
       results.push({ player: x.p.name, canto: x.canto.desc, pts: x.canto.pts, won: false, killedBy: winner.p.name });
     }
   });
 
   room.scores[winner.i] += totalPts;
-  addLog(room, `🎺 Cantos: ${winner.p.name} gana con ${winner.canto.desc} — +${totalPts} puntos`);
-  withCanto.filter(x => x.i !== winner.i).forEach(x => {
-    addLog(room, `  ↳ Mata el ${x.canto.desc} de ${x.p.name}`);
-  });
+  addRoundLog(room, { event: 'Cantos', player: winner.p.name, pts: totalPts, detail: winner.canto.desc });
+  addLog(room, `🎺 ${winner.p.name} gana cantos con ${winner.canto.desc} — +${totalPts} pts`);
+  withCanto.filter(x => x.i !== winner.i).forEach(x => addLog(room, `  ↳ Mata ${x.canto.desc} de ${x.p.name}`));
 
   room.cantoResults = results;
   room.cantosDone = true;
@@ -337,120 +328,90 @@ function resolveCantos(room) {
   sendState(room);
 }
 
-// ─── PLAY A CARD ──────────────────────────────────────────────────────────────
+// ─── PLAY CARD ────────────────────────────────────────────────────────────────
 function playCard(room, playerIdx, cardIndex) {
   const player = room.players[playerIdx];
   const card = player.hand[cardIndex];
   if (!card) return;
-
   const n = room.players.length;
 
-  // Remove card from hand
   player.hand.splice(cardIndex, 1);
-
   addLog(room, `🃏 ${player.name} juega ${card.display} de ${card.suit}`);
 
-  // ── Check for CAÍDA ──
+  // ── CAÍDA ──
   let caida = false;
-  if (room.lastPlayedBy !== -1 && room.lastPlayedCard) {
-    if (room.lastPlayedCard.val === card.val) {
-      // Caída! Player "falls" on the previous player's card
-      const pts = caídaPoints(card.val);
-      room.scores[playerIdx] += pts;
-      caida = true;
-      addLog(room, `💥 ¡CAÍDA! ${player.name} le cae a ${room.players[room.lastPlayedBy].name} con ${card.display} — +${pts} punto(s)`);
-      broadcast(room, { type: 'caida', by: player.name, on: room.players[room.lastPlayedBy].name, card: card, pts });
-    }
+  if (room.lastPlayedBy !== -1 && room.lastPlayedCard && room.lastPlayedCard.val === card.val) {
+    const pts = caídaPoints(card.val);
+    room.scores[playerIdx] += pts;
+    caida = true;
+    addRoundLog(room, { event: 'Caída', player: player.name, pts, detail: `${card.display} sobre ${room.players[room.lastPlayedBy].name}` });
+    addLog(room, `💥 ¡CAÍDA! ${player.name} cae sobre ${room.players[room.lastPlayedBy].name} — +${pts} pt`);
+    broadcast(room, { type: 'caida', by: player.name, on: room.players[room.lastPlayedBy].name, card, pts });
   }
 
-  // ── Try to collect from table ──
+  // ── COLLECT FROM TABLE ──
   let collected = [];
-
-  // Same number on table
   const sameOnTable = room.tableCards.filter(c => c.val === card.val);
-  if (sameOnTable.length > 0) {
-    collected = [...sameOnTable];
-    room.tableCards = room.tableCards.filter(c => c.val !== card.val);
-    collected.push(card); // also take the played card
-    addLog(room, `✅ ${player.name} limpia ${collected.length - 1} carta(s) de la mesa con ${card.display}`);
-  } else {
-    // Check for escalera: if table has consecutive cards including the played one
-    // Try to find a run on the table that starts with (or includes going up from) the played card
-    // Rule: if table has cards x, x+1, x+2 and you play x → take all from x upward
-    const tableVals = room.tableCards.map(c => c.val).sort((a, b) => a - b);
-    const playedVal = card.val;
 
-    // Find consecutive sequence on table starting at or below playedVal
-    // Player throws card val V: look for runs starting at V going up
-    let runStart = playedVal;
-    while (room.tableCards.some(c => c.val === runStart - 1)) runStart--;
-    // Build the full consecutive chain from runStart that includes playedVal
+  if (sameOnTable.length > 0) {
+    collected = [...sameOnTable, card];
+    room.tableCards = room.tableCards.filter(c => c.val !== card.val);
+    addLog(room, `✅ ${player.name} limpia con ${card.display}`);
+  } else {
+    // Escalera: la carta jugada debe ser el INICIO de una secuencia en la mesa.
+    // Recoge card.val, card.val+1, card.val+2, ... mientras existan en la mesa.
+    // La carta jugada NO tiene que estar ya en la mesa, actúa como inicio.
+    const tableValsSet = new Set(room.tableCards.map(c => c.val));
+    // Build run starting at card.val going UP through table cards
     let runVals = [];
-    let v = runStart;
-    while (room.tableCards.some(c => c.val === v) || v === playedVal) {
-      runVals.push(v);
-      v++;
-      if (v > 12) break;
-      if (!room.tableCards.some(c => c.val === v) && v !== playedVal) break;
-    }
-    // Only collect if the played card is part of a multi-card run on the table
-    const tableRunVals = runVals.filter(x => x !== playedVal);
-    if (tableRunVals.length >= 2 && runVals.includes(playedVal)) {
-      // Take all cards of those values from table
+    let v = card.val;
+    // card itself starts the run
+    runVals.push(v);
+    v++;
+    while (v <= 12 && tableValsSet.has(v)) { runVals.push(v); v++; }
+    // Only collect if there are at least 2 table cards above the played card
+    const tableRunVals = runVals.slice(1); // exclude the played card itself
+    if (tableRunVals.length >= 2) {
       tableRunVals.forEach(rv => {
         const found = room.tableCards.find(c => c.val === rv);
-        if (found) {
-          collected.push(found);
-          room.tableCards = room.tableCards.filter(c => c !== found);
-        }
+        if (found) { collected.push(found); room.tableCards = room.tableCards.filter(c => c !== found); }
       });
       collected.push(card);
-      addLog(room, `🎯 ${player.name} recoge escalera con ${card.display} — ${collected.length} cartas`);
+      addLog(room, `🎯 ${player.name} recoge escalera ${card.val}-${runVals[runVals.length-1]} — ${collected.length} cartas`);
     }
   }
 
-  if (collected.length > 0) {
+  const didCollect = collected.length > 0;
+
+  // ── MESA VACÍA (4 pts, solo si no es última tanda) ──
+  if (didCollect && room.tableCards.length === 0 && !room.isLastTanda) {
+    const pts = 4;
+    room.scores[playerIdx] += pts;
+    addRoundLog(room, { event: 'Mesa vacía', player: player.name, pts, detail: caida ? '+caída' : '' });
+    addLog(room, `🌟 ¡Mesa vacía! ${player.name} — +${pts} pts${caida ? ' (+ caída)' : ''}`);
+    broadcast(room, { type: 'mesa_vacia', by: player.name, pts, plusCaida: caida });
+  }
+
+  if (didCollect) {
     player.collected.push(...collected);
+    room.lastCollectorIdx = playerIdx;
   } else {
-    // Card goes to table (not collected)
     room.tableCards.push(card);
   }
 
-  // Update last played (for caída detection)
   room.lastPlayedCard = card;
   room.lastPlayedBy = playerIdx;
-
-  // Advance turn
   room.currentTurn = (playerIdx + 1) % n;
 
-  // Check if all hands empty → deal again or end
   const handsEmpty = room.players.every(p => p.hand.length === 0);
   if (handsEmpty) {
-    if (room.deck.length >= n * 3) {
-      // Deal more cards (3 per player, no new table cards)
-      room.players.forEach(p => { p.hand = room.deck.splice(0, 3); });
-      // In 3-player mode: if 1 card left after dealing, give it to dealer
-      if (room.deck.length === 1 && n === 3) {
-        room.players[room.dealer].hand.push(room.deck.pop());
-        addLog(room, `🃏 Carta sobrante al repartidor`);
-      }
-      addLog(room, `🃏 Nueva mano repartida`);
+    if (room.deck.length > 0) {
+      room.lastPlayedCard = null; room.lastPlayedBy = -1;
       sendState(room);
+      setTimeout(() => dealTanda(room), 800);
     } else {
-      // Remaining deck cards (< n*3) — deal what's left then end
-      if (room.deck.length > 0) {
-        // Distribute remaining cards evenly
-        let di = (room.dealer + 1) % n;
-        while (room.deck.length > 0) {
-          room.players[di].hand.push(room.deck.pop());
-          di = (di + 1) % n;
-        }
-      }
-      if (room.players.every(p => p.hand.length === 0)) {
-        endRound(room);
-        return;
-      }
       sendState(room);
+      setTimeout(() => endRound(room), 600);
     }
   } else {
     sendState(room);
@@ -461,55 +422,52 @@ function playCard(room, playerIdx, cardIndex) {
 function endRound(room) {
   const n = room.players.length;
 
-  // Remaining table cards go to last player who collected
   if (room.tableCards.length > 0) {
-    // Find last player who took cards
-    let lastCollector = -1;
-    let lastCollected = -1;
-    // Use lastPlayedBy as proxy for last collector (simplified)
-    // Actually: give remaining table to whoever last collected (tracking lastPlayedBy)
-    // In real game: last person to take cards takes remaining table
-    // We'll store this in lastCollectorIdx
-    const lastIdx = room.lastCollectorIdx !== undefined ? room.lastCollectorIdx : room.lastPlayedBy;
+    const lastIdx = room.lastCollectorIdx >= 0 ? room.lastCollectorIdx : room.lastPlayedBy;
     if (lastIdx >= 0) {
       room.players[lastIdx].collected.push(...room.tableCards);
-      addLog(room, `📦 Cartas restantes de la mesa van a ${room.players[lastIdx].name}`);
+      addLog(room, `📦 Cartas restantes → ${room.players[lastIdx].name}`);
     }
     room.tableCards = [];
   }
 
-  // Count cards for scoring
-  const totalCollected = room.players.map(p => p.collected.length);
   const base = n === 3 ? 13 : 20;
+  const totalCollected = room.players.map(p => p.collected.length);
+  const scoresBefore = [...room.scores];
 
-  addLog(room, `📊 Conteo final (base ${base}):`);
+  addLog(room, `📊 Conteo (base ${base}):`);
 
   if (n === 4 && room.teamMode) {
-    // Team mode: add team collections
-    const teamCollected = [0, 1].map(team =>
-      room.players.filter(p => p.team === team).reduce((s, p) => s + p.collected.length, 0)
+    const teamCollected = [0, 1].map(t =>
+      room.players.filter(p => p.team === t).reduce((s, p) => s + p.collected.length, 0)
     );
-    [0, 1].forEach(team => {
-      const extra = Math.max(0, teamCollected[team] - base);
+    [0, 1].forEach(t => {
+      const extra = Math.max(0, teamCollected[t] - base);
+      room.players.filter(p => p.team === t).forEach(p => { room.scores[room.players.indexOf(p)] += extra; });
+      addLog(room, `  Equipo ${t + 1}: ${teamCollected[t]} cartas → +${extra} pts`);
       if (extra > 0) {
-        room.players.filter(p => p.team === team).forEach(p => { room.scores[room.players.indexOf(p)] += extra; });
-        addLog(room, `  Equipo ${team + 1}: ${teamCollected[team]} cartas → +${extra} puntos`);
-      } else {
-        addLog(room, `  Equipo ${team + 1}: ${teamCollected[team]} cartas → +0 puntos`);
+        const nm = room.players.filter(p => p.team === t).map(p => p.name).join(' & ');
+        addRoundLog(room, { event: 'Cartas', player: nm, pts: extra, detail: `${teamCollected[t]} cartas` });
       }
     });
   } else {
     room.players.forEach((p, i) => {
       const extra = Math.max(0, totalCollected[i] - base);
       room.scores[i] += extra;
-      addLog(room, `  ${p.name}: ${totalCollected[i]} cartas → +${extra} puntos`);
+      addLog(room, `  ${p.name}: ${totalCollected[i]} cartas → +${extra} pts`);
+      if (extra > 0) addRoundLog(room, { event: 'Cartas', player: p.name, pts: extra, detail: `${totalCollected[i]} cartas` });
     });
   }
 
-  addLog(room, `🏆 Puntuación: ${room.players.map((p, i) => `${p.name}: ${room.scores[i]}`).join(' | ')}`);
+  addLog(room, `🏆 Marcador: ${room.players.map((p, i) => `${p.name}: ${room.scores[i]}`).join(' | ')}`);
 
-  const roundSummary = {
-    collected: room.players.map((p, i) => ({ name: p.name, cards: totalCollected[i], pts: room.scores[i] })),
+  const summary = {
+    log: room.roundLog,
+    players: room.players.map((p, i) => ({
+      name: p.name, cards: totalCollected[i],
+      scoreTotal: room.scores[i],
+      scoreDelta: room.scores[i] - scoresBefore[i],
+    })),
     scores: room.scores,
     base,
   };
@@ -517,8 +475,9 @@ function endRound(room) {
   room.state = 'round_end';
   room.round++;
   room.dealer = (room.dealer + 1) % n;
+  room.readyForNext = [];
 
-  broadcast(room, { type: 'round_end', summary: roundSummary, scores: room.scores });
+  broadcast(room, { type: 'round_end', summary });
   sendState(room);
 }
 
@@ -540,10 +499,9 @@ wss.on('connection', (ws) => {
       const maxP = [2, 3, 4].includes(msg.maxPlayers) ? msg.maxPlayers : 4;
       rooms[code] = createRoom(code, maxP);
       const room = rooms[code];
-      const p = { id: playerId, ws, name: msg.name || 'Jugador', team: 0, hand: [], collected: [], canto: null, cantoDeclared: false };
+      const p = { id: playerId, ws, name: msg.name || 'Jugador', team: 0, hand: [], collected: [], canto: null };
       room.players.push(p);
-      playerRoom = room;
-      playerData = p;
+      playerRoom = room; playerData = p;
       sendTo(p, { type: 'joined', roomCode: code, playerId });
       sendState(room);
       return;
@@ -554,19 +512,14 @@ wss.on('connection', (ws) => {
       if (!room) { ws.send(JSON.stringify({ type: 'error', msg: 'Sala no encontrada' })); return; }
       if (room.players.length >= room.maxPlayers) { ws.send(JSON.stringify({ type: 'error', msg: 'Sala llena' })); return; }
       if (room.state !== 'waiting') { ws.send(JSON.stringify({ type: 'error', msg: 'Partida en curso' })); return; }
-
-      const seatIdx = room.players.length;
-      const team = seatIdx % 2;
-      const p = { id: playerId, ws, name: msg.name || 'Jugador', team, hand: [], collected: [], canto: null, cantoDeclared: false };
+      const p = { id: playerId, ws, name: msg.name || 'Jugador', team: room.players.length % 2, hand: [], collected: [], canto: null };
       room.players.push(p);
-      playerRoom = room;
-      playerData = p;
+      playerRoom = room; playerData = p;
       sendTo(p, { type: 'joined', roomCode: room.code, playerId });
       addLog(room, `👤 ${p.name} se unió`);
       sendState(room);
-
       if (room.players.length === room.maxPlayers) {
-        addLog(room, `✅ ¡${room.maxPlayers} jugadores! La partida comenzará en 3 segundos...`);
+        addLog(room, `✅ ¡Todos listos! Comenzando en 3s...`);
         setTimeout(() => startGame(room), 3000);
       }
       return;
@@ -574,13 +527,19 @@ wss.on('connection', (ws) => {
 
     if (!playerRoom || !playerData) return;
 
+    if (msg.type === 'puestoChoice') {
+      if (playerRoom.state !== 'puesto_choosing') return;
+      if (playerRoom.players.indexOf(playerData) !== playerRoom.dealer) {
+        sendTo(playerData, { type: 'error', msg: 'Solo el repartidor elige' }); return;
+      }
+      startPuesto(playerRoom, msg.direction === 'asc' ? 'asc' : 'desc');
+      return;
+    }
+
     if (msg.type === 'playCard') {
       if (playerRoom.state !== 'playing') return;
       const pidx = playerRoom.players.indexOf(playerData);
-      if (pidx !== playerRoom.currentTurn) {
-        sendTo(playerData, { type: 'error', msg: 'No es tu turno' });
-        return;
-      }
+      if (pidx !== playerRoom.currentTurn) { sendTo(playerData, { type: 'error', msg: 'No es tu turno' }); return; }
       if (msg.cardIndex < 0 || msg.cardIndex >= playerData.hand.length) return;
       playCard(playerRoom, pidx, msg.cardIndex);
       return;
@@ -588,10 +547,10 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'nextRound') {
       if (playerRoom.state !== 'round_end') return;
-      if (!playerRoom.readyForNext) playerRoom.readyForNext = [];
       if (!playerRoom.readyForNext.includes(playerId)) {
         playerRoom.readyForNext.push(playerId);
-        broadcast(playerRoom, { type: 'log', msg: `✅ ${playerData.name} listo (${playerRoom.readyForNext.length}/${playerRoom.players.length})` });
+        broadcast(playerRoom, { type: 'ready_count', count: playerRoom.readyForNext.length, total: playerRoom.players.length });
+        addLog(playerRoom, `✅ ${playerData.name} listo (${playerRoom.readyForNext.length}/${playerRoom.players.length})`);
       }
       if (playerRoom.readyForNext.length >= playerRoom.players.length) {
         playerRoom.readyForNext = [];
@@ -616,7 +575,6 @@ wss.on('connection', (ws) => {
   });
 });
 
-// ─── START ────────────────────────────────────────────────────────────────────
 httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n🃏 Caída Server en puerto ${PORT}\n`);
+  console.log(`\n🃏 Caída Server — puerto ${PORT}\n`);
 });

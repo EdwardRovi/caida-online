@@ -55,11 +55,11 @@ function areConsecutive(vals) {
   return true;
 }
 
-// ─── CANTOS (fixed rules) ──────────────────────────────────────────────────────
-// Ronda:    2 iguales + 1 diferente (NO consecutiva al par)
-// Vigía:    2 iguales + 1 que es adyacente al par (val par ±1)
-// Patrulla: 3 consecutivas (todas distintas)
-// Tibilín:  3 iguales → gana el reparto
+// ─── CANTOS ───────────────────────────────────────────────────────────────────
+// Ronda:    2 iguales + 1 NO adyacente al par
+// Vigía:    2 iguales + 1 adyacente al par (±1)
+// Patrulla: 3 distintos consecutivos
+// Tibilín:  3 iguales → gana reparto
 function analyzeCantos(hand) {
   if (!hand || hand.length < 3) return null;
   const vals = hand.map(c => c.val);
@@ -68,30 +68,20 @@ function analyzeCantos(hand) {
   const entries = Object.entries(counts).map(([k, v]) => ({ val: parseInt(k), cnt: v }));
   const maxCnt = Math.max(...entries.map(e => e.cnt));
 
-  // Tibilín: 3 iguales
   if (maxCnt === 3) {
     const v = entries.find(e => e.cnt === 3).val;
     return { type: 'tibilin', rank: 100, pts: 0, val: v, desc: `Tibilín de ${v}` };
   }
-
-  // Par (2 iguales + 1 diferente)
   if (maxCnt === 2) {
     const pairVal = entries.find(e => e.cnt === 2).val;
     const singleVal = entries.find(e => e.cnt === 1).val;
-    // Vigía: la carta suelta es adyacente al par
-    if (Math.abs(pairVal - singleVal) === 1) {
+    if (Math.abs(pairVal - singleVal) === 1)
       return { type: 'vigia', rank: 3, pts: 7, val: pairVal, desc: `Vigía de ${pairVal}` };
-    }
-    // Ronda: par sin adyacente
     const pts = isFigure(pairVal) ? caídaPoints(pairVal) : 1;
     return { type: 'ronda', rank: 2, pts, val: pairVal, desc: `Ronda de ${pairVal}` };
   }
-
-  // Patrulla: 3 distintos y consecutivos
-  if (areConsecutive(vals)) {
+  if (areConsecutive(vals))
     return { type: 'patrulla', rank: 4, pts: 6, val: Math.max(...vals), desc: `Patrulla ${Math.min(...vals)}-${Math.max(...vals)}` };
-  }
-
   return null;
 }
 
@@ -115,6 +105,8 @@ function createRoom(code, maxPlayers) {
     round: 0,
     dealer: 0,
     currentTurn: 0,
+    // FIX: lastPlayedCard tracks the card as played to the TABLE (not collected)
+    // Only cards left on table count for caída detection
     lastPlayedCard: null,
     lastPlayedBy: -1,
     lastCollectorIdx: -1,
@@ -128,19 +120,18 @@ function createRoom(code, maxPlayers) {
     puestoTarget: null,
     puestoRevealed: [],
     puestoResult: null,
-    // Cantos: results hidden until next tanda or end of round
     cantosDone: false,
-    cantoResults: [],     // shown to clients
-    pendingCantoLog: [],  // hidden until reveal time
+    cantoResults: [],
+    pendingCantoLog: [],
     roundLog: [],
     readyForNext: [],
   };
 }
 
 function broadcast(room, msg) {
-  room.players.forEach(p => { if (p.ws.readyState === 1) p.ws.send(JSON.stringify(msg)); });
+  room.players.forEach(p => { if (p.ws && p.ws.readyState === 1) p.ws.send(JSON.stringify(msg)); });
 }
-function sendTo(p, msg) { if (p.ws.readyState === 1) p.ws.send(JSON.stringify(msg)); }
+function sendTo(p, msg) { if (p.ws && p.ws.readyState === 1) p.ws.send(JSON.stringify(msg)); }
 function addLog(room, msg) { broadcast(room, { type: 'log', msg }); }
 function addRoundLog(room, entry) { room.roundLog.push(entry); }
 
@@ -156,8 +147,8 @@ function buildStateFor(room, player) {
       collectedCount: p.collected ? p.collected.length : 0,
       isYou: p.id === player.id,
       hand: p.id === player.id ? p.hand : null,
-      // Only show canto type to the player themselves (hidden from others)
       hasCanto: !!(p.canto),
+      cantoType: p.canto ? p.canto.type : null,
       myCanto: p.id === player.id ? (p.canto || null) : null,
     })),
     tableCards: room.tableCards,
@@ -231,21 +222,18 @@ function revealNextPuestoCard(room) {
   const card = room.deck.splice(0, 1)[0];
   room.puestoRevealed.push(card);
   const target = room.puestoTarget;
-  const position = room.puestoTargetIdx + 1; // 1st, 2nd, 3rd, 4th card
+  const ordinals = ['primera', 'segunda', 'tercera', 'cuarta'];
+  const ordinal = ordinals[room.puestoTargetIdx] || `${room.puestoTargetIdx+1}ª`;
 
-  // Log with position
-  const ordinal = ['primera', 'segunda', 'tercera', 'cuarta'][position - 1] || `${position}ª`;
   addLog(room, `  ${ordinal} carta: ${card.display} de ${card.suit} (buscando ${target})`);
-
-  broadcast(room, { type: 'puesto_card_revealed', card, target, revealed: room.puestoRevealed, position });
+  broadcast(room, { type: 'puesto_card_revealed', card, target, revealed: room.puestoRevealed });
   sendState(room);
 
-  // Check for 4 identical cards in revealed set — dealer loses puesto, no penalty
-  const revealedVals = room.puestoRevealed.map(c => c.val);
-  const counts = {};
-  revealedVals.forEach(v => { counts[v] = (counts[v] || 0) + 1; });
-  if (Object.values(counts).some(c => c >= 4)) {
-    addLog(room, `⚠️ ¡4 cartas iguales! El repartidor pierde el puesto (sin penalización)`);
+  // Check 4 identical cards → dealer loses puesto, no penalty
+  const valCounts = {};
+  room.puestoRevealed.forEach(c => { valCounts[c.val] = (valCounts[c.val] || 0) + 1; });
+  if (Object.values(valCounts).some(c => c >= 4)) {
+    addLog(room, `⚠️ ¡4 cartas iguales! El repartidor pierde el puesto sin penalización`);
     room.tableCards = [...room.puestoRevealed];
     setTimeout(() => finishPuesto(room, false, 'identical4'), 800);
     return;
@@ -255,22 +243,21 @@ function revealNextPuestoCard(room) {
     const pts = target;
     room.scores[room.dealer] += pts;
     addRoundLog(room, { event: 'Puesto', player: room.players[room.dealer].name, pts, detail: `${card.display} = ${target}` });
-    addLog(room, `✅ ¡PUESTO! La ${ordinal} carta (${card.display}) es ${target} — +${pts} pts para ${room.players[room.dealer].name}`);
+    addLog(room, `✅ ¡PUESTO! La ${ordinal} carta es ${target} — +${pts} pts para ${room.players[room.dealer].name}`);
     room.tableCards = [...room.puestoRevealed];
     setTimeout(() => finishPuesto(room, true, 'hit'), 800);
   } else {
     room.puestoTargetIdx++;
     if (room.puestoTargetIdx >= room.puestoTargets.length) {
-      // All 4 cards revealed, none matched — mano gets 1 pt
       const manoIdx = (room.dealer + 1) % room.players.length;
       room.scores[manoIdx] += 1;
-      addRoundLog(room, { event: 'Puesto fallido', player: room.players[manoIdx].name, pts: 1, detail: 'Repartidor no acertó ninguna' });
+      addRoundLog(room, { event: 'Puesto fallido', player: room.players[manoIdx].name, pts: 1, detail: 'Sin acertar' });
       addLog(room, `❌ Puesto fallido — +1 para la mano (${room.players[manoIdx].name})`);
       room.tableCards = [...room.puestoRevealed];
       setTimeout(() => finishPuesto(room, false, 'miss'), 800);
     } else {
       room.puestoTarget = room.puestoTargets[room.puestoTargetIdx];
-      addLog(room, `  ↳ No es ${target}, ahora buscando el ${room.puestoTarget}...`);
+      addLog(room, `  ↳ No es ${target}, buscando el ${room.puestoTarget}...`);
       sendState(room);
       setTimeout(() => revealNextPuestoCard(room), 1200);
     }
@@ -279,16 +266,12 @@ function revealNextPuestoCard(room) {
 
 function finishPuesto(room, hit, reason) {
   room.puestoState = 'done';
-  // Fill table to 4 cards if not already there
   while (room.tableCards.length < 4 && room.deck.length > 0)
     room.tableCards.push(room.deck.splice(0, 1)[0]);
   room.puestoResult = { hit, direction: room.puestoDirection, reason };
-
-  // Log final table in order
-  const positions = ['primera', 'segunda', 'tercera', 'cuarta'];
-  const tableLog = room.tableCards.map((c, i) => `${positions[i] || (i+1+'ª')}: ${c.display}`).join(', ');
+  const ordinals = ['primera', 'segunda', 'tercera', 'cuarta'];
+  const tableLog = room.tableCards.map((c, i) => `${ordinals[i]||i+1}: ${c.display}`).join(', ');
   addLog(room, `🃏 Mesa: ${tableLog}`);
-
   sendState(room);
   setTimeout(() => dealTanda(room), 1200);
 }
@@ -297,7 +280,7 @@ function finishPuesto(room, hit, reason) {
 function dealTanda(room) {
   const n = room.players.length;
 
-  // Reveal pending canto results from previous tanda before dealing new one
+  // Reveal pending canto results from previous tanda
   if (room.pendingCantoLog && room.pendingCantoLog.length > 0) {
     addLog(room, `🎺 Cantos del turno anterior:`);
     room.pendingCantoLog.forEach(l => addLog(room, l));
@@ -311,7 +294,6 @@ function dealTanda(room) {
     p.hand = room.deck.splice(0, Math.min(3, room.deck.length));
   });
 
-  // 3p leftover
   if (n === 3 && room.deck.length === 1) {
     room.players[room.dealer].hand.push(room.deck.pop());
     addLog(room, `🃏 Carta sobrante al repartidor`);
@@ -319,6 +301,8 @@ function dealTanda(room) {
 
   room.players.forEach(p => { p.canto = p.hand.length >= 3 ? analyzeCantos(p.hand) : null; });
   room.cantosDone = false; room.cantoResults = [];
+  // FIX: Reset last played card between tandas so caída doesn't carry over
+  room.lastPlayedCard = null; room.lastPlayedBy = -1;
   room.state = 'cantos';
   room.currentTurn = (room.dealer + 1) % n;
 
@@ -329,7 +313,7 @@ function dealTanda(room) {
   resolveCantos(room);
 }
 
-// ─── CANTOS (hidden reveal) ────────────────────────────────────────────────────
+// ─── CANTOS ───────────────────────────────────────────────────────────────────
 function resolveCantos(room) {
   const n = room.players.length;
   const manoIdx = (room.dealer + 1) % n;
@@ -341,7 +325,6 @@ function resolveCantos(room) {
     sendState(room); return;
   }
 
-  // Tibilín: wins immediately and IS revealed (it ends the round)
   const tibilines = withCanto.filter(x => x.canto.type === 'tibilin');
   if (tibilines.length > 0) {
     const winner = tibilines.reduce((b, c) => ((c.i - manoIdx + n) % n) < ((b.i - manoIdx + n) % n) ? c : b);
@@ -353,7 +336,6 @@ function resolveCantos(room) {
     endRound(room); return;
   }
 
-  // Resolve winner silently — only show who has canto (chip visible), not what type
   let best = null;
   withCanto.forEach(x => { if (compareCantos(x.canto, best) > 0) best = x.canto; });
   const top = withCanto.filter(x => compareCantos(x.canto, best) === 0);
@@ -363,25 +345,23 @@ function resolveCantos(room) {
   const results = [];
   withCanto.forEach(x => {
     if (x.i === winner.i) {
-      results.push({ player: x.p.name, pts: x.canto.pts, won: true });
+      results.push({ player: x.p.name, cantoType: x.canto.type, pts: x.canto.pts, won: true });
     } else {
       totalPts += x.canto.pts;
-      results.push({ player: x.p.name, pts: x.canto.pts, won: false, killedBy: winner.p.name });
+      results.push({ player: x.p.name, cantoType: x.canto.type, pts: x.canto.pts, won: false, killedBy: winner.p.name });
     }
   });
 
   room.scores[winner.i] += totalPts;
   addRoundLog(room, { event: 'Cantos', player: winner.p.name, pts: totalPts, detail: winner.canto.desc });
 
-  // Save log for reveal at next tanda deal
-  const logLines = [];
-  logLines.push(`  ${winner.p.name} ganó cantos — +${totalPts} pts`);
+  const CANTO_NAME = { ronda: 'Ronda', vigia: 'Vigía', patrulla: 'Patrulla' };
+  const logLines = [`  ${winner.p.name} ganó cantos (${CANTO_NAME[winner.canto.type]||winner.canto.type}) — +${totalPts} pts`];
   withCanto.filter(x => x.i !== winner.i).forEach(x => {
-    logLines.push(`  ${x.p.name} tenía canto (matado por ${winner.p.name})`);
+    logLines.push(`  ${x.p.name} tenía ${CANTO_NAME[x.canto.type]||x.canto.type} (matado)`);
   });
   room.pendingCantoLog = logLines;
 
-  // Show chips (won/lost) but NO type details
   room.cantoResults = results;
   room.cantosDone = true;
   room.state = 'playing';
@@ -398,15 +378,20 @@ function playCard(room, playerIdx, cardIndex) {
   player.hand.splice(cardIndex, 1);
   addLog(room, `🃏 ${player.name} juega ${card.display} de ${card.suit}`);
 
-  // ── CAÍDA ──
+  // ── CAÍDA: only if lastPlayedCard is STILL ON THE TABLE (not collected) ──
+  // FIX: We only set lastPlayedCard when card goes to table, not when collected
   let caida = false;
   if (room.lastPlayedBy !== -1 && room.lastPlayedCard && room.lastPlayedCard.val === card.val) {
-    const pts = caídaPoints(card.val);
-    room.scores[playerIdx] += pts;
-    caida = true;
-    addRoundLog(room, { event: 'Caída', player: player.name, pts, detail: `${card.display} sobre ${room.players[room.lastPlayedBy].name}` });
-    addLog(room, `💥 ¡CAÍDA! ${player.name} cae sobre ${room.players[room.lastPlayedBy].name} — +${pts} pt`);
-    broadcast(room, { type: 'caida', by: player.name, on: room.players[room.lastPlayedBy].name, card, pts });
+    // Verify the last played card is actually still on the table
+    const stillOnTable = room.tableCards.some(c => c === room.lastPlayedCard);
+    if (stillOnTable) {
+      const pts = caídaPoints(card.val);
+      room.scores[playerIdx] += pts;
+      caida = true;
+      addRoundLog(room, { event: 'Caída', player: player.name, pts, detail: `${card.display} sobre ${room.players[room.lastPlayedBy].name}` });
+      addLog(room, `💥 ¡CAÍDA! ${player.name} cae sobre ${room.players[room.lastPlayedBy].name} — +${pts} pt`);
+      broadcast(room, { type: 'caida', by: player.name, on: room.players[room.lastPlayedBy].name, card, pts });
+    }
   }
 
   // ── COLLECT FROM TABLE ──
@@ -414,24 +399,30 @@ function playCard(room, playerIdx, cardIndex) {
   const sameOnTable = room.tableCards.filter(c => c.val === card.val);
 
   if (sameOnTable.length > 0) {
+    // Match: take all same-value cards + extend upward as escalera
+    // Start with the matching cards, then look for consecutive above
     collected = [...sameOnTable, card];
     room.tableCards = room.tableCards.filter(c => c.val !== card.val);
-    addLog(room, `✅ ${player.name} limpia con ${card.display}`);
-  } else {
-    // Escalera: played card starts the run, collect consecutive upward from table
+    // Now extend: take consecutive cards above from table
     const tableValsSet = new Set(room.tableCards.map(c => c.val));
-    let runVals = [card.val];
     let v = card.val + 1;
-    while (v <= 12 && tableValsSet.has(v)) { runVals.push(v); v++; }
-    const tableRunVals = runVals.slice(1);
-    if (tableRunVals.length >= 2) {
-      tableRunVals.forEach(rv => {
-        const found = room.tableCards.find(c => c.val === rv);
-        if (found) { collected.push(found); room.tableCards = room.tableCards.filter(c => c !== found); }
-      });
-      collected.push(card);
-      addLog(room, `🎯 ${player.name} recoge escalera ${card.val}-${runVals[runVals.length-1]}`);
+    while (v <= 12 && tableValsSet.has(v)) {
+      const found = room.tableCards.find(c => c.val === v);
+      if (found) {
+        collected.push(found);
+        room.tableCards = room.tableCards.filter(c => c !== found);
+        tableValsSet.delete(v);
+      }
+      v++;
     }
+    const topVal = collected[collected.length - 1].val;
+    if (topVal > card.val) {
+      addLog(room, `🎯 ${player.name} recoge escalera ${card.val}-${topVal}`);
+    } else {
+      addLog(room, `✅ ${player.name} limpia con ${card.display}`);
+    }
+  } else {
+    // Card not on table — goes to table, no escalera
   }
 
   const didCollect = collected.length > 0;
@@ -448,23 +439,25 @@ function playCard(room, playerIdx, cardIndex) {
   if (didCollect) {
     player.collected.push(...collected);
     room.lastCollectorIdx = playerIdx;
+    // FIX: Card was collected, reset lastPlayedCard so no false caída next turn
+    room.lastPlayedCard = null;
+    room.lastPlayedBy = -1;
   } else {
+    // Card stays on table — track it for caída
     room.tableCards.push(card);
+    room.lastPlayedCard = card;
+    room.lastPlayedBy = playerIdx;
   }
 
-  room.lastPlayedCard = card;
-  room.lastPlayedBy = playerIdx;
+  // FIX: advance turn within valid range
   room.currentTurn = (playerIdx + 1) % n;
 
-  // ── Check hands empty ──
   const handsEmpty = room.players.every(p => p.hand.length === 0);
   if (handsEmpty) {
     if (room.deck.length > 0) {
-      room.lastPlayedCard = null; room.lastPlayedBy = -1;
       sendState(room);
       setTimeout(() => dealTanda(room), 800);
     } else {
-      // Reveal pending canto log at end of round
       if (room.pendingCantoLog && room.pendingCantoLog.length > 0) {
         addLog(room, `🎺 Cantos del reparto:`);
         room.pendingCantoLog.forEach(l => addLog(room, l));
@@ -484,7 +477,7 @@ function endRound(room) {
 
   if (room.tableCards.length > 0) {
     const lastIdx = room.lastCollectorIdx >= 0 ? room.lastCollectorIdx : room.lastPlayedBy;
-    if (lastIdx >= 0) {
+    if (lastIdx >= 0 && lastIdx < n) {
       room.players[lastIdx].collected.push(...room.tableCards);
       addLog(room, `📦 Cartas restantes → ${room.players[lastIdx].name}`);
     }
@@ -597,10 +590,7 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.type === 'playCard') {
-      if (playerRoom.state !== 'playing') {
-        sendTo(playerData, { type: 'error', msg: `Estado actual: ${playerRoom.state}, no se puede jugar` });
-        return;
-      }
+      if (playerRoom.state !== 'playing') return;
       const pidx = playerRoom.players.indexOf(playerData);
       if (pidx !== playerRoom.currentTurn) { sendTo(playerData, { type: 'error', msg: 'No es tu turno' }); return; }
       if (msg.cardIndex < 0 || msg.cardIndex >= playerData.hand.length) return;
@@ -615,6 +605,7 @@ wss.on('connection', (ws) => {
         broadcast(playerRoom, { type: 'ready_count', count: playerRoom.readyForNext.length, total: playerRoom.players.length });
         addLog(playerRoom, `✅ ${playerData.name} listo (${playerRoom.readyForNext.length}/${playerRoom.players.length})`);
       }
+      // FIX: compare against current player count (handles disconnects during round_end)
       if (playerRoom.readyForNext.length >= playerRoom.players.length) {
         playerRoom.readyForNext = [];
         dealRound(playerRoom);
@@ -629,12 +620,36 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    if (playerRoom && playerData) {
-      broadcast(playerRoom, { type: 'log', msg: `⚠️ ${playerData.name} se desconectó` });
-      playerRoom.players = playerRoom.players.filter(p => p.id !== playerId);
-      if (playerRoom.players.length === 0) delete rooms[playerRoom.code];
-      else sendState(playerRoom);
+    if (!playerRoom || !playerData) return;
+    broadcast(playerRoom, { type: 'log', msg: `⚠️ ${playerData.name} se desconectó` });
+    playerRoom.players = playerRoom.players.filter(p => p.id !== playerId);
+
+    if (playerRoom.players.length === 0) {
+      delete rooms[playerRoom.code];
+      return;
     }
+
+    const n = playerRoom.players.length;
+
+    // FIX: if it was this player's turn, advance to next valid player
+    if (playerRoom.state === 'playing') {
+      // Clamp currentTurn to valid range
+      if (playerRoom.currentTurn >= n) playerRoom.currentTurn = 0;
+      addLog(playerRoom, `⚡ Turno avanzado automáticamente`);
+    }
+
+    // FIX: if dealer index is now out of range, wrap it
+    if (playerRoom.dealer >= n) playerRoom.dealer = 0;
+
+    // FIX: if in round_end and ready count now meets reduced player count, proceed
+    if (playerRoom.state === 'round_end' &&
+        playerRoom.readyForNext.length >= playerRoom.players.length) {
+      playerRoom.readyForNext = [];
+      setTimeout(() => dealRound(playerRoom), 500);
+      return;
+    }
+
+    sendState(playerRoom);
   });
 });
 

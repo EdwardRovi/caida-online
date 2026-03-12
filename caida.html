@@ -344,15 +344,7 @@ input[type="text"]:focus { border-color: var(--gold); background: rgba(255,255,2
 .canto-chip.won { background:rgba(201,168,76,0.2); border:1px solid rgba(201,168,76,0.5); color:var(--gold2); }
 .canto-chip.lost { background:rgba(255,60,60,0.1); border:1px solid rgba(255,60,60,0.3); color:rgba(255,120,120,0.8); text-decoration:line-through; }
 
-/* Exit button */
-#exit-btn {
-  position:fixed; bottom:12px; right:12px; z-index:200;
-  background:transparent; border:1px solid rgba(180,60,60,0.4); color:rgba(220,120,120,0.65);
-  font-family:'Cinzel Decorative',cursive; font-size:0.55rem; letter-spacing:0.06em;
-  padding:0.22rem 0.55rem; border-radius:3px; cursor:pointer; transition:all 0.15s;
-  display:none; white-space:nowrap;
-}
-#exit-btn:hover { background:rgba(120,20,20,0.6); border-color:rgba(220,80,80,0.7); color:#fff; }
+/* Exit button - inline in score bar only */
 
 /* Mobile */
 @media (max-width:600px) {
@@ -365,7 +357,7 @@ input[type="text"]:focus { border-color: var(--gold); background: rgba(255,255,2
   .card-suit-icon { font-size:1.3rem; }
   .card-face.mesa-card .card-suit-icon { font-size:1.1rem; }
   .card-val-corner { font-size:0.65rem; }
-  #exit-btn { bottom:6px; right:6px; font-size:0.5rem; }
+  #exit-btn { display:none; }
 }
 </style>
 </head>
@@ -377,7 +369,7 @@ input[type="text"]:focus { border-color: var(--gold); background: rgba(255,255,2
     <div id="round-end-content"></div>
   </div>
 </div>
-<button id="exit-btn" onclick="exitGame()">🚪 Salir</button>
+
 
 <div id="app">
 <!-- LOBBY -->
@@ -417,6 +409,7 @@ input[type="text"]:focus { border-color: var(--gold); background: rgba(255,255,2
     <p style="text-align:center;font-size:0.85rem;color:rgba(245,234,216,0.5);margin-bottom:0.5rem">Comparte este código · Esperando jugadores...</p>
     <div class="waiting-list" id="waiting-players"></div>
     <div class="waiting-status" id="waiting-status"></div>
+    <button class="btn btn-outline" style="margin-top:1.2rem;border-color:rgba(200,60,60,0.4);color:rgba(220,120,120,0.8)" onclick="exitGame()">🚪 Salir de la sala</button>
   </div>
 </div>
 
@@ -472,7 +465,7 @@ input[type="text"]:focus { border-color: var(--gold); background: rgba(255,255,2
         <div id="chat-messages"></div>
         <div class="chat-input-row">
           <input type="text" id="chat-input" placeholder="Escribe..." maxlength="120" onkeydown="if(event.key==='Enter')sendChat()">
-          <button onclick="sendChat()">↵</button>
+          <button onclick="sendChat()" style="font-family:sans-serif">▶</button>
         </div>
       </div>
     </div>
@@ -538,11 +531,14 @@ function joinRoom() {
   connect(() => send({ type:'joinRoom', code, name }));
 }
 function exitGame() {
-  if (ws) ws.close();
+  // Clear room first so ws.onclose doesn't trigger reconnect
   myId = null; myRoom = null; gameState = null;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (ws) { ws.onclose = null; ws.close(); ws = null; }
   document.getElementById('game').style.display = 'none';
   document.getElementById('lobby').style.display = 'flex';
-  document.getElementById('exit-btn').style.display = 'none';
+  document.getElementById('lobby-form').style.display = 'block';
+  document.getElementById('lobby-waiting').style.display = 'none';
   document.getElementById('round-end-overlay').classList.remove('visible');
 }
 
@@ -563,8 +559,11 @@ function handleMsg(msg) {
     } else {
       document.getElementById('lobby').style.display = 'none';
       document.getElementById('game').style.display = 'block';
-      document.getElementById('exit-btn').style.display = 'block';
       renderGame(msg.state);
+      // Close round-end overlay whenever state is NOT round_end
+      if (msg.state.gameState !== 'round_end') {
+        document.getElementById('round-end-overlay').classList.remove('visible');
+      }
     }
   }
 
@@ -582,7 +581,8 @@ function handleMsg(msg) {
   }
 
   if (msg.type === 'puesto_choose') {
-    // Handled via state render
+    // New round started — force close round-end overlay
+    document.getElementById('round-end-overlay').classList.remove('visible');
   }
 
   if (msg.type === 'puesto_card_revealed') {
@@ -828,6 +828,15 @@ function choosePuesto(dir) { send({ type:'puestoChoice', direction: dir }); }
 
 function sendNextRound() {
   send({ type:'nextRound' });
+  // Optimistically hide overlay — server will send new state shortly
+  // Only hide if both players are ready (button already shows full count)
+  const btn = document.getElementById('listo-btn');
+  if (btn) {
+    const match = btn.textContent.match(/\((\d+)\/(\d+)\)/);
+    if (match && match[1] === match[2]) {
+      document.getElementById('round-end-overlay').classList.remove('visible');
+    }
+  }
 }
 
 function sendChat() {
@@ -866,16 +875,19 @@ function renderRoundEnd(summary) {
   `).join('');
 
   const total = summary.players ? summary.players.length : 0;
+  const isGameOver = summary.gameOver;
   box.innerHTML = `
+    ${isGameOver ? `<div style="text-align:center;font-size:1.1rem;color:var(--gold2);margin-bottom:0.8rem;font-family:'Cinzel Decorative',cursive">🎉 ¡${esc(summary.winnerName)} gana la partida!</div>` : ''}
     <div style="background:rgba(0,0,0,0.3);border-radius:4px;margin-bottom:1rem;max-height:200px;overflow-y:auto">
       ${logRows}
     </div>
     <div style="font-size:0.75rem;color:rgba(201,168,76,0.5);text-align:left;margin-bottom:0.4rem;font-family:'Cinzel Decorative',cursive;letter-spacing:0.08em">MARCADOR</div>
     <div class="round-scores-list">${totalRows}</div>
     <div style="margin-top:1rem">
-      <button id="listo-btn" class="btn btn-gold" style="max-width:260px" onclick="sendNextRound()">
-        ✅ Listo (0/${total})
-      </button>
+      ${isGameOver
+        ? `<button class="btn btn-gold" style="max-width:260px" onclick="exitGame()">🏠 Volver al menú</button>`
+        : `<button id="listo-btn" class="btn btn-gold" style="max-width:260px" onclick="sendNextRound()">✅ Listo (0/${total})</button>`
+      }
     </div>
   `;
   document.getElementById('round-end-overlay').classList.add('visible');

@@ -78,10 +78,10 @@ function analyzeCantos(hand) {
     if (Math.abs(pairVal - singleVal) === 1)
       return { type: 'vigia', rank: 3, pts: 7, val: pairVal, desc: `Vigía de ${pairVal}` };
     const pts = isFigure(pairVal) ? caídaPoints(pairVal) : 1;
-    return { type: 'ronda', rank: 2, pts, val: pairVal, desc: `Ronda de ${pairVal}` };
+    return { type: 'ronda', rank: 1, pts, val: pairVal, desc: `Ronda de ${pairVal}` };
   }
   if (areConsecutive(vals))
-    return { type: 'patrulla', rank: 4, pts: 6, val: Math.max(...vals), desc: `Patrulla ${Math.min(...vals)}-${Math.max(...vals)}` };
+    return { type: 'patrulla', rank: 2, pts: 6, val: Math.max(...vals), desc: `Patrulla ${Math.min(...vals)}-${Math.max(...vals)}` };
   return null;
 }
 
@@ -219,7 +219,31 @@ function startPuesto(room, direction) {
 
 function revealNextPuestoCard(room) {
   if (room.deck.length === 0) { finishPuesto(room, false, 'nodeck'); return; }
-  const card = room.deck.splice(0, 1)[0];
+
+  // Draw a card, but skip if this value already appeared in revealed cards
+  // (can't have repeated values in the puesto display)
+  let card = null;
+  let attempts = 0;
+  while (room.deck.length > 0 && attempts < 40) {
+    const candidate = room.deck.splice(0, 1)[0];
+    const alreadySeen = room.puestoRevealed.some(c => c.val === candidate.val);
+    if (!alreadySeen) {
+      card = candidate;
+      break;
+    }
+    // Put it at the bottom of the deck and try next
+    room.deck.push(candidate);
+    attempts++;
+  }
+
+  // If all remaining cards have repeated values → dealer loses puesto
+  if (!card) {
+    addLog(room, `⚠️ No quedan cartas sin repetir — repartidor pierde el puesto`);
+    room.tableCards = [...room.puestoRevealed];
+    setTimeout(() => finishPuesto(room, false, 'noUnique'), 800);
+    return;
+  }
+
   room.puestoRevealed.push(card);
   const target = room.puestoTarget;
   const ordinals = ['primera', 'segunda', 'tercera', 'cuarta'];
@@ -228,16 +252,6 @@ function revealNextPuestoCard(room) {
   addLog(room, `  ${ordinal} carta: ${card.display} de ${card.suit} (buscando ${target})`);
   broadcast(room, { type: 'puesto_card_revealed', card, target, revealed: room.puestoRevealed });
   sendState(room);
-
-  // Check 4 identical cards → dealer loses puesto, no penalty
-  const valCounts = {};
-  room.puestoRevealed.forEach(c => { valCounts[c.val] = (valCounts[c.val] || 0) + 1; });
-  if (Object.values(valCounts).some(c => c >= 4)) {
-    addLog(room, `⚠️ ¡4 cartas iguales! El repartidor pierde el puesto sin penalización`);
-    room.tableCards = [...room.puestoRevealed];
-    setTimeout(() => finishPuesto(room, false, 'identical4'), 800);
-    return;
-  }
 
   if (card.val === target) {
     const pts = target;
@@ -266,8 +280,20 @@ function revealNextPuestoCard(room) {
 
 function finishPuesto(room, hit, reason) {
   room.puestoState = 'done';
-  while (room.tableCards.length < 4 && room.deck.length > 0)
-    room.tableCards.push(room.deck.splice(0, 1)[0]);
+  // Fill table to 4 cards, ensuring no repeated values
+  while (room.tableCards.length < 4 && room.deck.length > 0) {
+    const existingVals = new Set(room.tableCards.map(c => c.val));
+    // Find next card with unique value
+    let found = false;
+    for (let i = 0; i < room.deck.length; i++) {
+      if (!existingVals.has(room.deck[i].val)) {
+        room.tableCards.push(room.deck.splice(i, 1)[0]);
+        found = true;
+        break;
+      }
+    }
+    if (!found) break; // all remaining cards have repeated values, stop
+  }
   room.puestoResult = { hit, direction: room.puestoDirection, reason };
   const ordinals = ['primera', 'segunda', 'tercera', 'cuarta'];
   const tableLog = room.tableCards.map((c, i) => `${ordinals[i]||i+1}: ${c.display}`).join(', ');
@@ -427,7 +453,7 @@ function playCard(room, playerIdx, cardIndex) {
 
   const didCollect = collected.length > 0;
 
-  // ── MESA VACÍA (4 pts, solo si no es última tanda) ──
+  // ── MESA VACÍA (4 pts, solo si NO es la última tanda) ──
   if (didCollect && room.tableCards.length === 0 && !room.isLastTanda) {
     const pts = 4;
     room.scores[playerIdx] += pts;
@@ -514,6 +540,15 @@ function endRound(room) {
 
   addLog(room, `🏆 Marcador: ${room.players.map((p, i) => `${p.name}: ${room.scores[i]}`).join(' | ')}`);
 
+  // ── WIN CONDITION: first to 24+ pts wins ──
+  const WIN_SCORE = 24;
+  const winnerIdx = room.scores.findIndex(s => s >= WIN_SCORE);
+  const isGameOver = winnerIdx !== -1;
+  if (isGameOver) {
+    const winnerName = room.players[winnerIdx].name;
+    addLog(room, `🎉 ¡${winnerName} gana la partida con ${room.scores[winnerIdx]} pts!`);
+  }
+
   const summary = {
     log: room.roundLog,
     players: room.players.map((p, i) => ({
@@ -523,11 +558,15 @@ function endRound(room) {
     })),
     scores: room.scores,
     base,
+    gameOver: isGameOver,
+    winnerName: isGameOver ? room.players[winnerIdx].name : null,
   };
 
   room.state = 'round_end';
-  room.round++;
-  room.dealer = (room.dealer + 1) % n;
+  if (!isGameOver) {
+    room.round++;
+    room.dealer = (room.dealer + 1) % n;
+  }
   room.readyForNext = [];
 
   broadcast(room, { type: 'round_end', summary });
